@@ -107,6 +107,10 @@ func processJWTClaims(c echo.Context, app *pocketbase.PocketBase, config *Config
 	// If no JWT token found in header or cookie, check for Authorization header
 	if jwtToken == "" {
 		authHeader := c.Request().Header.Get("Authorization")
+
+		// Always log for debugging (remove later)
+		log.Printf("🔍 DEBUG: JWT='%s', AuthHeader='%s'", jwtToken, authHeader)
+
 		if authHeader == "" {
 			if config.Debug {
 				log.Printf("❌ No JWT token in header '%s' and no Authorization header found", config.JWTHeader)
@@ -114,16 +118,21 @@ func processJWTClaims(c echo.Context, app *pocketbase.PocketBase, config *Config
 			return apis.NewUnauthorizedError("Authentication required: provide either JWT header or Authorization Bearer token", nil)
 		}
 
+		log.Printf("✅ Found Authorization header, checking if it's a valid PocketBase token")
 		if config.Debug {
-			log.Printf("✅ Found Authorization header, checking if it's a valid PocketBase token")
+			log.Printf("🔍 Authorization header content: %s", authHeader[:20]+"...")
 		}
 
 		// Validate it's a valid PocketBase auth token (admin or user)
-		authRecord, _ := apis.RequestInfo(c).AuthRecord, apis.RequestInfo(c).Admin
-		if authRecord == nil && apis.RequestInfo(c).Admin == nil {
-			if config.Debug {
-				log.Printf("❌ Authorization header is not a valid PocketBase authentication token")
-			}
+		requestInfo := apis.RequestInfo(c)
+		authRecord := requestInfo.AuthRecord
+		admin := requestInfo.Admin
+
+		// Always log for debugging
+		log.Printf("🔍 DEBUG: AuthRecord=%v, Admin=%v", authRecord != nil, admin != nil)
+
+		if authRecord == nil && admin == nil {
+			log.Printf("❌ Authorization header is not a valid PocketBase authentication token")
 			return apis.NewUnauthorizedError("Invalid authentication token", nil)
 		}
 
