@@ -250,10 +250,10 @@ func findOrCreateUser(app core.App, claims PomeriumClaims) (*core.Record, error)
 		return nil, fmt.Errorf("no user identifier found in JWT claims (oid or sub)")
 	}
 
-	// Try to find existing user by JWT ID
+	// First, try to find existing user by JWT ID
 	record, err := app.FindFirstRecordByData(collection, "jwt_id", userID)
 	if err == nil {
-		// User exists, update their info and return
+		// User exists with this JWT ID, update their info and return
 		log.Printf("Found existing user with JWT ID: %s", userID)
 		updateUserRecord(record, claims)
 		if err := app.Save(record); err != nil {
@@ -262,8 +262,23 @@ func findOrCreateUser(app core.App, claims PomeriumClaims) (*core.Record, error)
 		return record, nil
 	}
 
-	// User doesn't exist, create new one
-	log.Printf("Creating new user with JWT ID: %s", userID)
+	// Second, try to find existing user by email (in case they exist but don't have jwt_id set)
+	if claims.Email != "" {
+		record, err = app.FindFirstRecordByData(collection, "email", claims.Email)
+		if err == nil {
+			// User exists with this email, update their JWT ID and other info
+			log.Printf("Found existing user with email: %s, updating JWT ID to: %s", claims.Email, userID)
+			record.Set("jwt_id", userID) // Link this JWT ID to the existing user
+			updateUserRecord(record, claims)
+			if err := app.Save(record); err != nil {
+				return nil, fmt.Errorf("failed to update user record: %v", err)
+			}
+			return record, nil
+		}
+	}
+
+	// User doesn't exist by JWT ID or email, create new one
+	log.Printf("Creating new user with JWT ID: %s, email: %s", userID, claims.Email)
 	record = core.NewRecord(collection)
 	record.Set("jwt_id", userID)
 	updateUserRecord(record, claims)
