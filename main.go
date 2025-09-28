@@ -164,16 +164,30 @@ func handleGetCurrentUser(app core.App, e *core.RequestEvent, config *Config) er
 	}
 
 	// Get the authenticated user from request context
-	requestInfo, err := e.RequestInfo()
-	if err != nil {
-		return apis.NewInternalServerError("Failed to get request info", err)
+	var user *core.Record
+	
+	// First try to get from our stored context
+	if storedAuth := e.Get("auth"); storedAuth != nil {
+		if authRecord, ok := storedAuth.(*core.Record); ok {
+			user = authRecord
+		}
+	}
+	
+	// Fallback to RequestInfo if not found in stored context
+	if user == nil {
+		requestInfo, err := e.RequestInfo()
+		if err != nil {
+			return apis.NewInternalServerError("Failed to get request info", err)
+		}
+		user = requestInfo.Auth
 	}
 
-	if requestInfo.Auth == nil {
+	if user == nil {
+		if config.Debug {
+			log.Printf("❌ No authenticated user found in request context")
+		}
 		return apis.NewUnauthorizedError("No authenticated user found", nil)
 	}
-
-	user := requestInfo.Auth
 
 	// Return user information
 	userInfo := map[string]interface{}{
@@ -182,7 +196,6 @@ func handleGetCurrentUser(app core.App, e *core.RequestEvent, config *Config) er
 		"display_name": user.GetString("display_name"),
 		"username":     user.GetString("username"),
 		"verified":     user.GetBool("verified"),
-		"jwt_id":       user.GetString("jwt_id"),
 	}
 
 	if config.Debug {
@@ -211,12 +224,18 @@ func processJWTClaims(app core.App, e *core.RequestEvent, config *Config) error 
 
 	// Check X-Pomerium-Jwt-Assertion header first (most specific)
 	token = e.Request.Header.Get("X-Pomerium-Jwt-Assertion")
+	if config.Debug && token != "" {
+		log.Printf("🔑 Found JWT in X-Pomerium-Jwt-Assertion header")
+	}
 
 	// Check _pomerium cookie if no header found
 	if token == "" {
 		cookie, err := e.Request.Cookie("_pomerium")
 		if err == nil {
 			token = cookie.Value
+			if config.Debug {
+				log.Printf("🔑 Found JWT in _pomerium cookie")
+			}
 		}
 	}
 
@@ -224,6 +243,8 @@ func processJWTClaims(app core.App, e *core.RequestEvent, config *Config) error 
 	if token == "" {
 		if config.Debug {
 			log.Printf("🚫 No valid superuser auth and no Pomerium JWT found")
+			log.Printf("   Headers: %+v", e.Request.Header)
+			log.Printf("   Cookies: %+v", e.Request.Cookies())
 		}
 		return fmt.Errorf("authentication required: provide either valid superuser credentials or Pomerium JWT via X-Pomerium-Jwt-Assertion header or _pomerium cookie")
 	}
@@ -241,20 +262,26 @@ func processJWTClaims(app core.App, e *core.RequestEvent, config *Config) error 
 	// Find or create user based on JWT claims
 	user, err := findOrCreateUser(app, *claims)
 	if err != nil {
+		if config.Debug {
+			log.Printf("❌ Failed to find or create user: %v", err)
+		}
 		return fmt.Errorf("failed to find or create user: %w", err)
 	}
 
 	// Set the authenticated user context so PocketBase treats this as an authenticated user
+	// Store the user in the request context for later retrieval
+	e.Set("auth", user)
+	
+	// Also try to set it in RequestInfo for PocketBase compatibility
 	reqInfo, infoErr := e.RequestInfo()
-	if infoErr != nil {
-		return fmt.Errorf("failed to get request info: %w", infoErr)
+	if infoErr == nil {
+		reqInfo.Auth = user
 	}
-
-	// Set the authenticated record in the request context
-	reqInfo.Auth = user
 
 	if config.Debug {
 		log.Printf("✅ User authenticated via JWT: %s (%s)", user.GetString("display_name"), user.Id)
+		log.Printf("   User ID: %s", user.Id)
+		log.Printf("   Email: %s", user.GetString("email"))
 	}
 
 	return nil
@@ -308,11 +335,11 @@ func findOrCreateUser(app core.App, claims PomeriumClaims) (*core.Record, error)
 		return nil, fmt.Errorf("no user identifier found in JWT claims (oid or sub)")
 	}
 
-	// First, try to find existing user by JWT ID
-	record, err := app.FindFirstRecordByData(collection, "jwt_id", userID)
+	// First, try to find existing user by ID (using the JWT oid directly as the record ID)
+	record, err := app.FindRecordById(collection, userID)
 	if err == nil {
-		// User exists with this JWT ID, update their info and return
-		log.Printf("Found existing user with JWT ID: %s", userID)
+		// User exists with this ID, update their info and return
+		log.Printf("Found existing user with ID: %s", userID)
 		updateUserRecord(record, claims)
 		if err := app.Save(record); err != nil {
 			return nil, fmt.Errorf("failed to update user record: %v", err)
@@ -320,13 +347,13 @@ func findOrCreateUser(app core.App, claims PomeriumClaims) (*core.Record, error)
 		return record, nil
 	}
 
-	// Second, try to find existing user by email (in case they exist but don't have jwt_id set)
+	// Second, try to find existing user by email (in case they exist but have a different ID)
 	if claims.Email != "" {
 		record, err = app.FindFirstRecordByData(collection, "email", claims.Email)
 		if err == nil {
-			// User exists with this email, update their JWT ID and other info
-			log.Printf("Found existing user with email: %s, updating JWT ID to: %s", claims.Email, userID)
-			record.Set("jwt_id", userID) // Link this JWT ID to the existing user
+			// User exists with this email but different ID - this is a conflict
+			// We'll keep the existing record but log a warning
+			log.Printf("Warning: Found existing user with email %s but different ID. Existing ID: %s, JWT ID: %s", claims.Email, record.Id, userID)
 			updateUserRecord(record, claims)
 			if err := app.Save(record); err != nil {
 				return nil, fmt.Errorf("failed to update user record: %v", err)
@@ -335,10 +362,10 @@ func findOrCreateUser(app core.App, claims PomeriumClaims) (*core.Record, error)
 		}
 	}
 
-	// User doesn't exist by JWT ID or email, create new one
-	log.Printf("Creating new user with JWT ID: %s, email: %s", userID, claims.Email)
+	// User doesn't exist, create new one with explicit ID from JWT
+	log.Printf("Creating new user with ID: %s, email: %s", userID, claims.Email)
 	record = core.NewRecord(collection)
-	record.Set("jwt_id", userID)
+	record.Set("id", userID) // Set the record ID to the JWT oid
 	updateUserRecord(record, claims)
 
 	if err := app.Save(record); err != nil {
@@ -354,16 +381,30 @@ func updateUserRecord(record *core.Record, claims PomeriumClaims) {
 	if claims.Name != "" {
 		record.Set("name", claims.Name)
 	}
-	if claims.Email != "" {
-		record.Set("email", claims.Email)
+	
+	// Set email - use a default if not provided in JWT
+	email := claims.Email
+	if email == "" {
+		// Generate a placeholder email based on JWT ID if no email is provided
+		var userID string
+		if claims.Oid != "" {
+			userID = claims.Oid
+		} else if claims.Sub != "" {
+			userID = claims.Sub
+		} else {
+			userID = "unknown"
+		}
+		email = fmt.Sprintf("%s@pomerium-user.local", userID)
 	}
+	record.Set("email", email)
+	
 	if claims.GivenName != "" {
 		record.Set("given_name", claims.GivenName)
 	}
 	if claims.FamilyName != "" {
 		record.Set("family_name", claims.FamilyName)
 	}
-
+	
 	// Set a display name (fallback hierarchy: name -> given+family -> email -> jwt_id)
 	displayName := getDisplayName(claims)
 	record.Set("display_name", displayName)
@@ -377,17 +418,15 @@ func updateUserRecord(record *core.Record, claims PomeriumClaims) {
 	securePassword := generateSecurePassword()
 	record.Set("password", securePassword)
 	record.Set("passwordConfirm", securePassword)
-
+	
 	// Set email visibility to true so emails are accessible
 	record.Set("emailVisibility", true)
-
+	
 	// Set verified to true since users are already verified by Pomerium
 	record.Set("verified", true)
 
-	log.Printf("Updated user record: display_name=%s, username=%s", displayName, username)
-}
-
-// getDisplayName generates a display name from JWT claims
+	log.Printf("Updated user record: display_name=%s, username=%s, email=%s", displayName, username, email)
+}// getDisplayName generates a display name from JWT claims
 func getDisplayName(claims PomeriumClaims) string {
 	if claims.Name != "" {
 		return claims.Name
