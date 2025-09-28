@@ -88,7 +88,67 @@ routes:
       X-Pomerium-Jwt-Assertion: "{{ .pomerium.jwt }}"
 ```
 
-## 📋 Protected Collections
+## � Custom API Endpoints
+
+The middleware adds custom endpoints for authentication and user information:
+
+### `GET /api/pomerium/me`
+
+Returns information about the currently authenticated user.
+
+**Authentication**: Requires either superuser credentials or valid Pomerium JWT
+
+**Response**:
+
+```json
+{
+  "user": {
+    "id": "user_record_id",
+    "email": "user@example.com",
+    "display_name": "John Doe",
+    "username": "john.doe",
+    "verified": true,
+    "jwt_id": "pomerium_jwt_identifier"
+  },
+  "authenticated": true
+}
+```
+
+**Usage**:
+
+```bash
+# With Pomerium JWT cookie
+curl https://your-app.com/api/pomerium/me
+
+# With JWT header
+curl -H "X-Pomerium-Jwt-Assertion: <jwt>" https://your-app.com/api/pomerium/me
+
+# With admin token
+curl -H "Authorization: Bearer <admin_token>" https://your-app.com/api/pomerium/me
+```
+
+### `POST /api/pomerium/auth`
+
+Simple authentication test endpoint that validates JWT and auto-provisions users.
+
+**Authentication**: Requires either superuser credentials or valid Pomerium JWT
+
+**Response**:
+
+```json
+{
+  "message": "Authentication successful"
+}
+```
+
+**Use Cases**:
+
+- Test if Pomerium JWT is valid
+- Trigger user auto-provisioning
+- Health check for authentication middleware
+- Integration testing
+
+## �📋 Protected Collections
 
 **This middleware protects ALL collections:**
 

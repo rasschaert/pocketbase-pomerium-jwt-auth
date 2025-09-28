@@ -49,15 +49,28 @@ func main() {
 		log.Printf("  Debug: %t", config.Debug)
 	}
 
-	// Register custom auth endpoints on serve event
+	// Register custom endpoints on serve event (using /api/pomerium to avoid collision with system /api/auth routes)
 	app.OnServe().BindFunc(func(e *core.ServeEvent) error {
-		e.Router.POST("/api/auth/pomerium", func(re *core.RequestEvent) error {
+		// Register POST endpoint for Pomerium auth
+		e.Router.POST("/api/pomerium/auth", func(re *core.RequestEvent) error {
+			if config.Debug {
+				log.Printf("🔗 POST /api/pomerium/auth called")
+			}
 			return handlePomeriumAuth(app, re, config)
-		}).Bind(apis.SkipSuccessActivityLog())
+		})
 
-		e.Router.GET("/api/auth/me", func(re *core.RequestEvent) error {
+		// Register GET endpoint for current user info
+		e.Router.GET("/api/pomerium/me", func(re *core.RequestEvent) error {
+			if config.Debug {
+				log.Printf("🔗 GET /api/pomerium/me called")
+			}
 			return handleGetCurrentUser(app, re, config)
-		}).Bind(apis.SkipSuccessActivityLog())
+		})
+
+		// Always log endpoint registration (not just in debug mode)
+		log.Printf("✅ Registered custom endpoints:")
+		log.Printf("  POST /api/pomerium/auth")
+		log.Printf("  GET  /api/pomerium/me")
 
 		return e.Next()
 	})
@@ -136,7 +149,7 @@ func generateSecurePassword() string {
 func handlePomeriumAuth(app core.App, e *core.RequestEvent, config *Config) error {
 	err := processJWTClaims(app, e, config)
 	if err != nil {
-		return e.BadRequestError("Authentication failed: "+err.Error(), nil)
+		return apis.NewBadRequestError("Authentication failed: "+err.Error(), nil)
 	}
 
 	return e.JSON(http.StatusOK, map[string]string{"message": "Authentication successful"})
@@ -147,17 +160,17 @@ func handleGetCurrentUser(app core.App, e *core.RequestEvent, config *Config) er
 	// Process JWT claims to set user context
 	err := processJWTClaims(app, e, config)
 	if err != nil {
-		return e.UnauthorizedError("Authentication required: "+err.Error(), nil)
+		return apis.NewUnauthorizedError("Authentication required: "+err.Error(), nil)
 	}
 
 	// Get the authenticated user from request context
 	requestInfo, err := e.RequestInfo()
 	if err != nil {
-		return e.InternalServerError("Failed to get request info", err)
+		return apis.NewInternalServerError("Failed to get request info", err)
 	}
 
 	if requestInfo.Auth == nil {
-		return e.UnauthorizedError("No authenticated user found", nil)
+		return apis.NewUnauthorizedError("No authenticated user found", nil)
 	}
 
 	user := requestInfo.Auth
