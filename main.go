@@ -49,11 +49,16 @@ func main() {
 		log.Printf("  Debug: %t", config.Debug)
 	}
 
-	// Register custom auth endpoint on serve event
+	// Register custom auth endpoints on serve event
 	app.OnServe().BindFunc(func(e *core.ServeEvent) error {
 		e.Router.POST("/api/auth/pomerium", func(re *core.RequestEvent) error {
 			return handlePomeriumAuth(app, re, config)
 		}).Bind(apis.SkipSuccessActivityLog())
+
+		e.Router.GET("/api/auth/me", func(re *core.RequestEvent) error {
+			return handleGetCurrentUser(app, re, config)
+		}).Bind(apis.SkipSuccessActivityLog())
+
 		return e.Next()
 	})
 
@@ -135,6 +140,46 @@ func handlePomeriumAuth(app core.App, e *core.RequestEvent, config *Config) erro
 	}
 
 	return e.JSON(http.StatusOK, map[string]string{"message": "Authentication successful"})
+}
+
+// handleGetCurrentUser returns information about the currently authenticated user
+func handleGetCurrentUser(app core.App, e *core.RequestEvent, config *Config) error {
+	// Process JWT claims to set user context
+	err := processJWTClaims(app, e, config)
+	if err != nil {
+		return e.UnauthorizedError("Authentication required: "+err.Error(), nil)
+	}
+
+	// Get the authenticated user from request context
+	requestInfo, err := e.RequestInfo()
+	if err != nil {
+		return e.InternalServerError("Failed to get request info", err)
+	}
+
+	if requestInfo.Auth == nil {
+		return e.UnauthorizedError("No authenticated user found", nil)
+	}
+
+	user := requestInfo.Auth
+
+	// Return user information
+	userInfo := map[string]interface{}{
+		"id":           user.Id,
+		"email":        user.GetString("email"),
+		"display_name": user.GetString("display_name"),
+		"username":     user.GetString("username"),
+		"verified":     user.GetBool("verified"),
+		"jwt_id":       user.GetString("jwt_id"),
+	}
+
+	if config.Debug {
+		log.Printf("🔍 Current user info requested: %s (%s)", user.GetString("display_name"), user.GetString("email"))
+	}
+
+	return e.JSON(http.StatusOK, map[string]interface{}{
+		"user":          userInfo,
+		"authenticated": true,
+	})
 }
 
 // processJWTClaims extracts and processes JWT claims for authentication
@@ -305,7 +350,7 @@ func updateUserRecord(record *core.Record, claims PomeriumClaims) {
 	if claims.FamilyName != "" {
 		record.Set("family_name", claims.FamilyName)
 	}
-	
+
 	// Set a display name (fallback hierarchy: name -> given+family -> email -> jwt_id)
 	displayName := getDisplayName(claims)
 	record.Set("display_name", displayName)
@@ -319,10 +364,10 @@ func updateUserRecord(record *core.Record, claims PomeriumClaims) {
 	securePassword := generateSecurePassword()
 	record.Set("password", securePassword)
 	record.Set("passwordConfirm", securePassword)
-	
+
 	// Set email visibility to true so emails are accessible
 	record.Set("emailVisibility", true)
-	
+
 	// Set verified to true since users are already verified by Pomerium
 	record.Set("verified", true)
 
