@@ -1,5 +1,6 @@
 # Go binaries
 pocketbase-auth
+pocketbase-pomerium-jwt-auth
 *.exe
 *.exe~
 *.dll
