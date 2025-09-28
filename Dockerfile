@@ -6,7 +6,8 @@ WORKDIR /app
 # Install build dependencies
 RUN apk add --no-cache git
 
-# Copy go mod files
+# Copy go mod filesgit st
+
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -45,6 +46,12 @@ RUN mkdir -p /pb_data && \
 # Switch to non-root user
 USER pocketbase
 
+# Set working directory to data directory
+WORKDIR /pb_data
+
+# Set environment variable for data directory
+ENV PB_DATA_DIR=/pb_data
+
 # Expose port
 EXPOSE 8090
 
@@ -57,4 +64,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # Set entrypoint and default command
 ENTRYPOINT ["/usr/local/bin/pocketbase-pomerium-jwt-auth"]
-CMD ["serve", "--http=0.0.0.0:8090"]
+CMD ["serve", "--http=0.0.0.0:8090", "--dir=/pb_data"]
