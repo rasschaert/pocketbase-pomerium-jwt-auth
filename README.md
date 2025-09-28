@@ -101,17 +101,21 @@ Returns information about the currently authenticated user.
 **Response**:
 
 ```json
+**Response**:
+```json
 {
   "user": {
-    "id": "user_record_id",
-    "email": "user@example.com",
+    "id": "7bd41554-4539-48e2-8b2c-f49a8823bb26",
+    "email": "user@example.com", 
     "display_name": "John Doe",
     "username": "john.doe",
-    "verified": true,
-    "jwt_id": "pomerium_jwt_identifier"
+    "verified": true
   },
   "authenticated": true
 }
+```
+
+**Note**: The `id` field contains the JWT's `oid` (Object ID) directly - no separate `jwt_id` field is needed.
 ```
 
 **Usage**:
@@ -223,9 +227,10 @@ flowchart TD
    - `X-Pomerium-Jwt-Assertion` header (priority)
    - `_pomerium` cookie (fallback)
 3. **User Provisioning**: If JWT found, auto-creates/updates user using:
-   - **User ID**: `oid` (preferred) or `sub` from JWT claims
+   - **Record ID**: Uses JWT's `oid` (preferred) or `sub` directly as PocketBase user ID
    - **Profile Data**: `email`, `name`, `given_name`, `family_name`
    - **Display Fields**: Generated `display_name` and `username`
+   - **Lookup Method**: Direct ID lookup (`FindRecordById`) instead of field searches
 
 ### For Admin Endpoints (`/api/_*` and `/api/admins/*`)
 

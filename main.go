@@ -165,14 +165,14 @@ func handleGetCurrentUser(app core.App, e *core.RequestEvent, config *Config) er
 
 	// Get the authenticated user from request context
 	var user *core.Record
-	
+
 	// First try to get from our stored context
 	if storedAuth := e.Get("auth"); storedAuth != nil {
 		if authRecord, ok := storedAuth.(*core.Record); ok {
 			user = authRecord
 		}
 	}
-	
+
 	// Fallback to RequestInfo if not found in stored context
 	if user == nil {
 		requestInfo, err := e.RequestInfo()
@@ -271,7 +271,7 @@ func processJWTClaims(app core.App, e *core.RequestEvent, config *Config) error 
 	// Set the authenticated user context so PocketBase treats this as an authenticated user
 	// Store the user in the request context for later retrieval
 	e.Set("auth", user)
-	
+
 	// Also try to set it in RequestInfo for PocketBase compatibility
 	reqInfo, infoErr := e.RequestInfo()
 	if infoErr == nil {
@@ -381,7 +381,7 @@ func updateUserRecord(record *core.Record, claims PomeriumClaims) {
 	if claims.Name != "" {
 		record.Set("name", claims.Name)
 	}
-	
+
 	// Set email - use a default if not provided in JWT
 	email := claims.Email
 	if email == "" {
@@ -397,14 +397,14 @@ func updateUserRecord(record *core.Record, claims PomeriumClaims) {
 		email = fmt.Sprintf("%s@pomerium-user.local", userID)
 	}
 	record.Set("email", email)
-	
+
 	if claims.GivenName != "" {
 		record.Set("given_name", claims.GivenName)
 	}
 	if claims.FamilyName != "" {
 		record.Set("family_name", claims.FamilyName)
 	}
-	
+
 	// Set a display name (fallback hierarchy: name -> given+family -> email -> jwt_id)
 	displayName := getDisplayName(claims)
 	record.Set("display_name", displayName)
@@ -418,15 +418,15 @@ func updateUserRecord(record *core.Record, claims PomeriumClaims) {
 	securePassword := generateSecurePassword()
 	record.Set("password", securePassword)
 	record.Set("passwordConfirm", securePassword)
-	
+
 	// Set email visibility to true so emails are accessible
 	record.Set("emailVisibility", true)
-	
+
 	// Set verified to true since users are already verified by Pomerium
 	record.Set("verified", true)
 
 	log.Printf("Updated user record: display_name=%s, username=%s, email=%s", displayName, username, email)
-}// getDisplayName generates a display name from JWT claims
+} // getDisplayName generates a display name from JWT claims
 func getDisplayName(claims PomeriumClaims) string {
 	if claims.Name != "" {
 		return claims.Name
