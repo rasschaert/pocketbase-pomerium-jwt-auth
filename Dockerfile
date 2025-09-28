@@ -13,8 +13,8 @@ RUN go mod download
 # Copy source code
 COPY main.go .
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+# Build the application natively
+RUN CGO_ENABLED=0 go build \
     -ldflags="-w -s" \
     -o pocketbase-pomerium-jwt-auth .
 
