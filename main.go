@@ -53,15 +53,36 @@ func main() {
 		return e.Next()
 	})
 
-	// Add JWT processing hooks for protected collections
-	app.OnRecordsListRequest("users").BindFunc(func(e *core.RecordsListRequestEvent) error {
+	// Add JWT processing hooks for ALL collections (protect everything)
+	app.OnRecordsListRequest().BindFunc(func(e *core.RecordsListRequestEvent) error {
 		if err := processJWTClaims(app, e.RequestEvent, config); err != nil {
 			return e.ForbiddenError("Unauthorized: "+err.Error(), nil)
 		}
 		return e.Next()
 	})
 
-	app.OnRecordViewRequest("users").BindFunc(func(e *core.RecordRequestEvent) error {
+	app.OnRecordViewRequest().BindFunc(func(e *core.RecordRequestEvent) error {
+		if err := processJWTClaims(app, e.RequestEvent, config); err != nil {
+			return e.ForbiddenError("Unauthorized: "+err.Error(), nil)
+		}
+		return e.Next()
+	})
+
+	app.OnRecordCreateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
+		if err := processJWTClaims(app, e.RequestEvent, config); err != nil {
+			return e.ForbiddenError("Unauthorized: "+err.Error(), nil)
+		}
+		return e.Next()
+	})
+
+	app.OnRecordUpdateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
+		if err := processJWTClaims(app, e.RequestEvent, config); err != nil {
+			return e.ForbiddenError("Unauthorized: "+err.Error(), nil)
+		}
+		return e.Next()
+	})
+
+	app.OnRecordDeleteRequest().BindFunc(func(e *core.RecordRequestEvent) error {
 		if err := processJWTClaims(app, e.RequestEvent, config); err != nil {
 			return e.ForbiddenError("Unauthorized: "+err.Error(), nil)
 		}
@@ -101,27 +122,22 @@ func handlePomeriumAuth(app core.App, e *core.RequestEvent, config *Config) erro
 
 // processJWTClaims extracts and processes JWT claims for authentication
 func processJWTClaims(app core.App, e *core.RequestEvent, config *Config) error {
-	// Get JWT token from Authorization header, X-Pomerium-Jwt-Assertion header, or _pomerium cookie
+	// First, check if there's already valid superuser authentication
+	requestInfo, err := e.RequestInfo()
+	if err == nil && requestInfo.HasSuperuserAuth() {
+		if config.Debug {
+			log.Printf("✅ Valid superuser authentication found, allowing request")
+		}
+		return nil // Superuser is already authenticated, no need for JWT processing
+	}
+
+	// Look for Pomerium JWT sources
 	var token string
 
-	// Check Authorization header first (supports both "jwt_token" and "Bearer jwt_token" formats)
-	auth := e.Request.Header.Get("Authorization")
-	if auth != "" {
-		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-			// Extract token from "Bearer jwt_token" format
-			token = strings.TrimSpace(auth[7:])
-		} else {
-			// Use as-is for direct JWT token format
-			token = strings.TrimSpace(auth)
-		}
-	}
+	// Check X-Pomerium-Jwt-Assertion header first (most specific)
+	token = e.Request.Header.Get("X-Pomerium-Jwt-Assertion")
 
-	// Check X-Pomerium-Jwt-Assertion header if no Authorization header
-	if token == "" {
-		token = e.Request.Header.Get("X-Pomerium-Jwt-Assertion")
-	}
-
-	// Check _pomerium cookie if no headers found
+	// Check _pomerium cookie if no header found
 	if token == "" {
 		cookie, err := e.Request.Cookie("_pomerium")
 		if err == nil {
@@ -129,8 +145,12 @@ func processJWTClaims(app core.App, e *core.RequestEvent, config *Config) error 
 		}
 	}
 
+	// If no Pomerium-specific JWT sources found, require authentication
 	if token == "" {
-		return fmt.Errorf("no JWT token found in Authorization header, X-Pomerium-Jwt-Assertion header, or _pomerium cookie")
+		if config.Debug {
+			log.Printf("🚫 No valid superuser auth and no Pomerium JWT found")
+		}
+		return fmt.Errorf("authentication required: provide either valid superuser credentials or Pomerium JWT via X-Pomerium-Jwt-Assertion header or _pomerium cookie")
 	}
 
 	// Extract JWT claims (without signature validation)
@@ -144,9 +164,22 @@ func processJWTClaims(app core.App, e *core.RequestEvent, config *Config) error 
 	}
 
 	// Find or create user based on JWT claims
-	_, err = findOrCreateUser(app, *claims)
+	user, err := findOrCreateUser(app, *claims)
 	if err != nil {
 		return fmt.Errorf("failed to find or create user: %w", err)
+	}
+
+	// Set the authenticated user context so PocketBase treats this as an authenticated user
+	reqInfo, infoErr := e.RequestInfo()
+	if infoErr != nil {
+		return fmt.Errorf("failed to get request info: %w", infoErr)
+	}
+	
+	// Set the authenticated record in the request context
+	reqInfo.Auth = user
+	
+	if config.Debug {
+		log.Printf("✅ User authenticated via JWT: %s (%s)", user.GetString("display_name"), user.Id)
 	}
 
 	return nil

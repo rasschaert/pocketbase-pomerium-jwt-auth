@@ -10,7 +10,7 @@ services:
       # Configuration environment variables
       - DEBUG=false
       - JWT_HEADER=X-Pomerium-Jwt-Assertion
-      - PB_DATA_DIR=/pb_data  # PocketBase data directory (optional, defaults to /pb_data)
+      - PB_DATA_DIR=/pb_data # PocketBase data directory (optional, defaults to /pb_data)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8090/api/health"]
       interval: 30s
