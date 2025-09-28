@@ -4,11 +4,12 @@ A PocketBase middleware that secures collection access with [Pomerium Zero](http
 
 ## 🎯 **Scope: Collections Only**
 
-**This middleware ONLY affects collection endpoints** (`/api/collections/*`). 
+**This middleware ONLY affects collection endpoints** (`/api/collections/*`).
 
 All other PocketBase endpoints work exactly as normal:
+
 - ✅ Admin UI (`/api/_/*`) - Standard PocketBase authentication
-- ✅ Admin API (`/api/admins/*`) - Standard admin tokens  
+- ✅ Admin API (`/api/admins/*`) - Standard admin tokens
 - ✅ System endpoints - No additional authentication
 - ✅ Health checks, logs, etc. - Unchanged
 
@@ -17,10 +18,11 @@ All other PocketBase endpoints work exactly as normal:
 Three simple things:
 
 1. **🛡️ Protect ALL collections** (not just "users") - requires authentication for any collection access
-2. **👤 Auto-provision users** from JWT claims when they authenticate via Pomerium 
+2. **👤 Auto-provision users** from JWT claims when they authenticate via Pomerium
 3. **🎭 Set the authenticated user context** so PocketBase treats subsequent requests as coming from that provisioned user
 
 **Authentication Options:**
+
 - ✅ **Superuser credentials** (admin tokens/sessions) → Full access as admin
 - ✅ **Pomerium JWT** (header/cookie) → Auto-provision user → Authenticated as that user
 - ❌ **No valid auth** → Blocked
@@ -95,6 +97,7 @@ routes:
 - ✅ **Auto-Provisioning**: Users are automatically created in the `users` collection from JWT claims
 
 **Authentication Flow:**
+
 1. **Superuser Access**: Admin tokens/sessions work normally (full access)
 2. **Pomerium Users**: JWT → Auto-provision in `users` → Set as authenticated user → Apply collection rules
 3. **No Auth**: Requests are blocked

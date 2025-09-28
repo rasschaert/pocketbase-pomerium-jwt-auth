@@ -174,10 +174,10 @@ func processJWTClaims(app core.App, e *core.RequestEvent, config *Config) error 
 	if infoErr != nil {
 		return fmt.Errorf("failed to get request info: %w", infoErr)
 	}
-	
+
 	// Set the authenticated record in the request context
 	reqInfo.Auth = user
-	
+
 	if config.Debug {
 		log.Printf("✅ User authenticated via JWT: %s (%s)", user.GetString("display_name"), user.Id)
 	}
