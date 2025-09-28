@@ -3,18 +3,18 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 
-	"github.com/labstack/echo/v5"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
-	"github.com/pocketbase/pocketbase/models"
 )
 
-// PomeriumClaims represents the JWT payload from Pomerium (no signature validation needed)
+// PomeriumClaims represents the JWT payload from Pomerium
 type PomeriumClaims struct {
 	Email      string `json:"email"`
 	Name       string `json:"name"`
@@ -27,7 +27,7 @@ type PomeriumClaims struct {
 	FamilyName string `json:"family_name"`
 }
 
-// Config holds our simplified configuration
+// Config holds our configuration
 type Config struct {
 	JWTHeader string
 	Debug     bool
@@ -45,23 +45,27 @@ func main() {
 		log.Printf("  Debug: %t", config.Debug)
 	}
 
-	// Use PocketBase hooks for JWT claim processing
-	app.OnRecordsListRequest().Add(func(e *core.RecordsListEvent) error {
-		if e.Collection.Name != "users" {
-			return nil
-		}
-
-		c := e.HttpContext
-		return processJWTClaims(c, app, config)
+	// Register custom auth endpoint on serve event
+	app.OnServe().BindFunc(func(e *core.ServeEvent) error {
+		e.Router.POST("/api/auth/pomerium", func(re *core.RequestEvent) error {
+			return handlePomeriumAuth(app, re, config)
+		}).Bind(apis.SkipSuccessActivityLog())
+		return e.Next()
 	})
 
-	app.OnRecordViewRequest().Add(func(e *core.RecordViewEvent) error {
-		if e.Collection.Name != "users" {
-			return nil
+	// Add JWT processing hooks for protected collections
+	app.OnRecordsListRequest("users").BindFunc(func(e *core.RecordsListRequestEvent) error {
+		if err := processJWTClaims(app, e.RequestEvent, config); err != nil {
+			return e.ForbiddenError("Unauthorized: "+err.Error(), nil)
 		}
+		return e.Next()
+	})
 
-		c := e.HttpContext
-		return processJWTClaims(c, app, config)
+	app.OnRecordViewRequest("users").BindFunc(func(e *core.RecordRequestEvent) error {
+		if err := processJWTClaims(app, e.RequestEvent, config); err != nil {
+			return e.ForbiddenError("Unauthorized: "+err.Error(), nil)
+		}
+		return e.Next()
 	})
 
 	if err := app.Start(); err != nil {
@@ -85,94 +89,64 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-// processJWTClaims extracts claims from JWT without signature validation
-func processJWTClaims(c echo.Context, app *pocketbase.PocketBase, config *Config) error {
-	if config.Debug {
-		log.Printf("🔍 Processing authentication for users collection")
-	}
-
-	// Extract JWT from header first
-	jwtToken := c.Request().Header.Get(config.JWTHeader)
-
-	// If no JWT in header, check for _pomerium cookie
-	if jwtToken == "" {
-		if cookie, err := c.Request().Cookie("_pomerium"); err == nil {
-			jwtToken = cookie.Value
-			if config.Debug {
-				log.Printf("✅ Found JWT token in _pomerium cookie")
-			}
-		}
-	}
-
-	// If no JWT token found in header or cookie, check for Authorization header
-	if jwtToken == "" {
-		authHeader := c.Request().Header.Get("Authorization")
-
-		// Always log for debugging (remove later)
-		log.Printf("🔍 DEBUG: JWT='%s', AuthHeader='%s'", jwtToken, authHeader)
-
-		if authHeader == "" {
-			if config.Debug {
-				log.Printf("❌ No JWT token in header '%s' and no Authorization header found", config.JWTHeader)
-			}
-			return apis.NewUnauthorizedError("Authentication required: provide either JWT header or Authorization Bearer token", nil)
-		}
-
-		log.Printf("✅ Found Authorization header, checking if it's a valid PocketBase token")
-		if config.Debug {
-			log.Printf("🔍 Authorization header content: %s", authHeader[:20]+"...")
-		}
-
-		// Validate it's a valid PocketBase auth token (admin or user)
-		requestInfo := apis.RequestInfo(c)
-		authRecord := requestInfo.AuthRecord
-		admin := requestInfo.Admin
-
-		// Always log for debugging
-		log.Printf("🔍 DEBUG: AuthRecord=%v, Admin=%v", authRecord != nil, admin != nil)
-
-		if authRecord == nil && admin == nil {
-			log.Printf("❌ Authorization header is not a valid PocketBase authentication token")
-			return apis.NewUnauthorizedError("Invalid authentication token", nil)
-		}
-
-		if config.Debug {
-			if authRecord != nil {
-				log.Printf("✅ Valid user authentication: %s", authRecord.GetString("email"))
-			} else {
-				log.Printf("✅ Valid admin authentication")
-			}
-		}
-
-		// Valid PocketBase authentication - no need to process JWT claims
-		return nil
-	}
-
-	if config.Debug {
-		log.Printf("✅ Found JWT token in header '%s', extracting claims (no signature validation)", config.JWTHeader)
-	}
-
-	// Extract claims from JWT payload (no validation)
-	claims, err := extractJWTClaims(jwtToken)
+// handlePomeriumAuth handles the custom auth endpoint
+func handlePomeriumAuth(app core.App, e *core.RequestEvent, config *Config) error {
+	err := processJWTClaims(app, e, config)
 	if err != nil {
-		log.Printf("❌ Failed to extract JWT claims: %v", err)
-		return apis.NewBadRequestError("Invalid JWT format", err)
+		return e.BadRequestError("Authentication failed: "+err.Error(), nil)
 	}
 
-	if config.Debug {
-		log.Printf("✅ JWT claims extracted successfully")
-		log.Printf("👤 User: %s (%s)", claims.Email, claims.Name)
+	return e.JSON(http.StatusOK, map[string]string{"message": "Authentication successful"})
+}
+
+// processJWTClaims extracts and processes JWT claims for authentication
+func processJWTClaims(app core.App, e *core.RequestEvent, config *Config) error {
+	// Get JWT token from Authorization header, X-Pomerium-Jwt-Assertion header, or _pomerium cookie
+	var token string
+
+	// Check Authorization header first (supports both "jwt_token" and "Bearer jwt_token" formats)
+	auth := e.Request.Header.Get("Authorization")
+	if auth != "" {
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			// Extract token from "Bearer jwt_token" format
+			token = strings.TrimSpace(auth[7:])
+		} else {
+			// Use as-is for direct JWT token format
+			token = strings.TrimSpace(auth)
+		}
 	}
 
-	// Create or update user based on JWT claims
-	user, err := findOrCreateUser(app, claims, config)
+	// Check X-Pomerium-Jwt-Assertion header if no Authorization header
+	if token == "" {
+		token = e.Request.Header.Get("X-Pomerium-Jwt-Assertion")
+	}
+
+	// Check _pomerium cookie if no headers found
+	if token == "" {
+		cookie, err := e.Request.Cookie("_pomerium")
+		if err == nil {
+			token = cookie.Value
+		}
+	}
+
+	if token == "" {
+		return fmt.Errorf("no JWT token found in Authorization header, X-Pomerium-Jwt-Assertion header, or _pomerium cookie")
+	}
+
+	// Extract JWT claims (without signature validation)
+	claims, err := extractJWTClaims(token)
 	if err != nil {
-		log.Printf("❌ Failed to create/update user: %v", err)
-		return apis.NewBadRequestError("Failed to process user", err)
+		return fmt.Errorf("failed to extract JWT claims: %w", err)
 	}
 
 	if config.Debug {
-		log.Printf("👤 User processed: %s (%s)", user.GetString("email"), user.Id)
+		log.Printf("🎫 JWT Claims: %+v", claims)
+	}
+
+	// Find or create user based on JWT claims
+	_, err = findOrCreateUser(app, *claims)
+	if err != nil {
+		return fmt.Errorf("failed to find or create user: %w", err)
 	}
 
 	return nil
@@ -183,7 +157,7 @@ func extractJWTClaims(tokenString string) (*PomeriumClaims, error) {
 	// Split JWT into parts (header.payload.signature)
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
-		return nil, apis.NewBadRequestError("Invalid JWT format", nil)
+		return nil, fmt.Errorf("invalid JWT format")
 	}
 
 	// Decode payload (second part)
@@ -197,124 +171,88 @@ func extractJWTClaims(tokenString string) (*PomeriumClaims, error) {
 	// Decode base64
 	decoded, err := base64.URLEncoding.DecodeString(payload)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode JWT payload: %w", err)
 	}
 
 	// Parse JSON claims
 	var claims PomeriumClaims
 	if err := json.Unmarshal(decoded, &claims); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse JWT claims: %w", err)
 	}
 
 	return &claims, nil
 }
 
 // findOrCreateUser finds an existing user or creates a new one based on JWT claims
-func findOrCreateUser(app *pocketbase.PocketBase, claims *PomeriumClaims, config *Config) (*models.Record, error) {
-	// Determine unique identifier - prefer oid, fallback to sub
-	var uniqueId string
-	var idField string
+func findOrCreateUser(app core.App, claims PomeriumClaims) (*core.Record, error) {
+	collection, err := app.FindCollectionByNameOrId("users")
+	if err != nil {
+		return nil, fmt.Errorf("users collection not found: %v", err)
+	}
 
+	// Use JWT ID (oid or sub) as the primary identifier for finding users
+	var userID string
 	if claims.Oid != "" {
-		uniqueId = claims.Oid
-		idField = "pomerium_oid"
+		userID = claims.Oid
 	} else if claims.Sub != "" {
-		uniqueId = claims.Sub
-		idField = "pomerium_sub"
+		userID = claims.Sub
 	} else {
-		return nil, apis.NewBadRequestError("No unique identifier found in JWT (oid or sub required)", nil)
+		return nil, fmt.Errorf("no user identifier found in JWT claims (oid or sub)")
 	}
 
-	collection, err := app.Dao().FindCollectionByNameOrId("users")
-	if err != nil {
-		return nil, err
+	// Try to find existing user by JWT ID
+	record, err := app.FindFirstRecordByData(collection, "jwt_id", userID)
+	if err == nil {
+		// User exists, update their info and return
+		log.Printf("Found existing user with JWT ID: %s", userID)
+		updateUserRecord(record, claims)
+		if err := app.Save(record); err != nil {
+			return nil, fmt.Errorf("failed to update user record: %v", err)
+		}
+		return record, nil
 	}
 
-	// Try to find existing user by Pomerium ID (oid or sub)
-	record, err := app.Dao().FindFirstRecordByFilter(
-		collection.Id,
-		idField+" = {:id}",
-		map[string]any{"id": uniqueId},
-	)
+	// User doesn't exist, create new one
+	log.Printf("Creating new user with JWT ID: %s", userID)
+	record = core.NewRecord(collection)
+	record.Set("jwt_id", userID)
+	updateUserRecord(record, claims)
 
-	if err != nil {
-		// User doesn't exist, create new one
-		if config.Debug {
-			log.Printf("👤 Creating new user with %s: %s", idField, uniqueId)
-		}
-
-		record = models.NewRecord(collection)
-
-		// Set core fields
-		record.Set("name", getDisplayName(claims))
-		record.Set("username", generateUsername(claims))
-		record.Set("verified", true) // Trust Pomerium authentication
-
-		// Set email if available
-		if claims.Email != "" {
-			record.Set("email", claims.Email)
-		}
-
-		// Store Pomerium identifiers for future lookups
-		if claims.Oid != "" {
-			record.Set("pomerium_oid", claims.Oid)
-		}
-		if claims.Sub != "" {
-			record.Set("pomerium_sub", claims.Sub)
-		}
-		if claims.IdpId != "" {
-			record.Set("pomerium_idp_id", claims.IdpId)
-		}
-
-		// Set additional fields from JWT claims
-		if claims.GivenName != "" {
-			record.Set("given_name", claims.GivenName)
-		}
-		if claims.FamilyName != "" {
-			record.Set("family_name", claims.FamilyName)
-		}
-
-		if err := app.Dao().SaveRecord(record); err != nil {
-			return nil, err
-		}
-
-		if config.Debug {
-			emailInfo := "no email"
-			if claims.Email != "" {
-				emailInfo = claims.Email
-			}
-			log.Printf("✅ User created successfully: %s (%s) [%s]", emailInfo, record.Id, uniqueId)
-		}
-	} else {
-		// User exists, optionally update info
-		if config.Debug {
-			log.Printf("👤 User exists: %s (%s)", record.GetString("name"), record.Id)
-		}
-
-		// Update name and email if they have changed
-		needsUpdate := false
-
-		if displayName := getDisplayName(claims); displayName != record.GetString("name") {
-			record.Set("name", displayName)
-			needsUpdate = true
-		}
-
-		if claims.Email != "" && claims.Email != record.GetString("email") {
-			record.Set("email", claims.Email)
-			needsUpdate = true
-		}
-
-		if needsUpdate {
-			if err := app.Dao().SaveRecord(record); err != nil {
-				log.Printf("⚠️  Failed to update user info: %v", err)
-			}
-		}
+	if err := app.Save(record); err != nil {
+		return nil, fmt.Errorf("failed to create user record: %v", err)
 	}
 
 	return record, nil
 }
 
-func getDisplayName(claims *PomeriumClaims) string {
+// updateUserRecord updates a user record with JWT claims data
+func updateUserRecord(record *core.Record, claims PomeriumClaims) {
+	// Update user record with JWT claims
+	if claims.Name != "" {
+		record.Set("name", claims.Name)
+	}
+	if claims.Email != "" {
+		record.Set("email", claims.Email)
+	}
+	if claims.GivenName != "" {
+		record.Set("given_name", claims.GivenName)
+	}
+	if claims.FamilyName != "" {
+		record.Set("family_name", claims.FamilyName)
+	}
+	// Set a display name (fallback hierarchy: name -> given+family -> email -> jwt_id)
+	displayName := getDisplayName(claims)
+	record.Set("display_name", displayName)
+
+	// Set username (fallback hierarchy: preferred_username -> email -> jwt_id)
+	username := getUsername(claims)
+	record.Set("username", username)
+
+	log.Printf("Updated user record: display_name=%s, username=%s", displayName, username)
+}
+
+// getDisplayName generates a display name from JWT claims
+func getDisplayName(claims PomeriumClaims) string {
 	if claims.Name != "" {
 		return claims.Name
 	}
@@ -324,36 +262,31 @@ func getDisplayName(claims *PomeriumClaims) string {
 	if claims.GivenName != "" {
 		return claims.GivenName
 	}
-	// Fall back to email prefix if available
 	if claims.Email != "" {
-		if emailParts := strings.Split(claims.Email, "@"); len(emailParts) > 0 {
-			return emailParts[0]
-		}
 		return claims.Email
 	}
-	// Final fallback to user ID
 	if claims.Oid != "" {
-		return "User " + claims.Oid[:8] // Show first 8 chars of OID
+		return "User " + claims.Oid
 	}
 	if claims.Sub != "" {
-		return "User " + claims.Sub[:8] // Show first 8 chars of Sub
+		return "User " + claims.Sub
 	}
 	return "Anonymous User"
 }
 
-func generateUsername(claims *PomeriumClaims) string {
+// getUsername generates a username from JWT claims
+func getUsername(claims PomeriumClaims) string {
 	if claims.Email != "" {
 		// Use email prefix as username
 		if emailParts := strings.Split(claims.Email, "@"); len(emailParts) > 0 {
 			return strings.ToLower(emailParts[0])
 		}
 	}
-	// Generate username from ID if no email
 	if claims.Oid != "" {
-		return "user_" + strings.ToLower(claims.Oid[:8])
+		return "user_" + claims.Oid
 	}
 	if claims.Sub != "" {
-		return "user_" + strings.ToLower(claims.Sub[:8])
+		return "user_" + claims.Sub
 	}
 	return "anonymous_user"
 }
