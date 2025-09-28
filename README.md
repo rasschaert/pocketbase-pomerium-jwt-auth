@@ -4,8 +4,8 @@ PocketBase offers a lot of functionality out of the box, but it allows you to [a
 
 By default, PocketBase allows unauthenticated requests to it's "collections". This projects adds a simple middleware to:
 
-- Require either a valid Authorization header (Bearer token) or a Pomerium JWT header for collection requests
-- If the Pomerium JWT header is present, auto-provision a PocketBase user from the JWT claims (email, name, sub, etc)
+- Require either a valid Authorization header (Bearer token) or a Pomerium JWT (header or cookie) for collection requests
+- If the Pomerium JWT is present, auto-provision a PocketBase user from the JWT claims (oid, sub, email, name, etc)
 
 Endpoints that are not for collection requests are not impacted by this middlware. This way Admin users can log in with username/password via the standard PocketBase admin UI, while regular users accessing collections are auto-provisioned via Pomerium Zero.
 
@@ -75,9 +75,9 @@ routes:
 ### For Collection Requests (`/api/collections/*`)
 
 1. User hits Pomerium Zero URL → Pomerium validates JWT signatures
-2. Pomerium forwards request → Includes JWT in `X-Pomerium-Jwt-Assertion` header
-3. PocketBase middleware checks for JWT or valid Authorization Bearer token
-4. If JWT present: User auto-created/updated from JWT claims (email, name, sub, etc.)
+2. Pomerium forwards request → Includes JWT in `X-Pomerium-Jwt-Assertion` header OR `_pomerium` cookie
+3. PocketBase middleware checks for JWT (header/cookie) or valid Authorization Bearer token
+4. If JWT present: User auto-created/updated using JWT IDs (oid/sub) and claims (email, name, etc.)
 5. If Bearer token: Validates against existing PocketBase user/admin authentication
 
 ### For Admin Endpoints (`/api/_*` and `/api/admins/*`)

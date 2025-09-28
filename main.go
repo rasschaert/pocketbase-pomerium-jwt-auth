@@ -19,6 +19,8 @@ type PomeriumClaims struct {
 	Email      string `json:"email"`
 	Name       string `json:"name"`
 	Sub        string `json:"sub"`
+	Oid        string `json:"oid"`    // Object ID - primary unique identifier
+	IdpId      string `json:"idp_id"` // Identity Provider ID
 	Aud        string `json:"aud"`
 	Iss        string `json:"iss"`
 	GivenName  string `json:"given_name"`
@@ -89,10 +91,20 @@ func processJWTClaims(c echo.Context, app *pocketbase.PocketBase, config *Config
 		log.Printf("🔍 Processing authentication for users collection")
 	}
 
-	// Extract JWT from header
+	// Extract JWT from header first
 	jwtToken := c.Request().Header.Get(config.JWTHeader)
 
-	// If no JWT token found, check for Authorization header
+	// If no JWT in header, check for _pomerium cookie
+	if jwtToken == "" {
+		if cookie, err := c.Request().Cookie("_pomerium"); err == nil {
+			jwtToken = cookie.Value
+			if config.Debug {
+				log.Printf("✅ Found JWT token in _pomerium cookie")
+			}
+		}
+	}
+
+	// If no JWT token found in header or cookie, check for Authorization header
 	if jwtToken == "" {
 		authHeader := c.Request().Header.Get("Authorization")
 		if authHeader == "" {
@@ -208,8 +220,18 @@ func extractJWTClaims(tokenString string) (*PomeriumClaims, error) {
 
 // findOrCreateUser finds an existing user or creates a new one based on JWT claims
 func findOrCreateUser(app *pocketbase.PocketBase, claims *PomeriumClaims, config *Config) (*models.Record, error) {
-	if claims.Email == "" {
-		return nil, apis.NewBadRequestError("Email claim is required", nil)
+	// Determine unique identifier - prefer oid, fallback to sub
+	var uniqueId string
+	var idField string
+
+	if claims.Oid != "" {
+		uniqueId = claims.Oid
+		idField = "pomerium_oid"
+	} else if claims.Sub != "" {
+		uniqueId = claims.Sub
+		idField = "pomerium_sub"
+	} else {
+		return nil, apis.NewBadRequestError("No unique identifier found in JWT (oid or sub required)", nil)
 	}
 
 	collection, err := app.Dao().FindCollectionByNameOrId("users")
@@ -217,24 +239,41 @@ func findOrCreateUser(app *pocketbase.PocketBase, claims *PomeriumClaims, config
 		return nil, err
 	}
 
-	// Try to find existing user by email
+	// Try to find existing user by Pomerium ID (oid or sub)
 	record, err := app.Dao().FindFirstRecordByFilter(
 		collection.Id,
-		"email = {:email}",
-		map[string]any{"email": claims.Email},
+		idField+" = {:id}",
+		map[string]any{"id": uniqueId},
 	)
 
 	if err != nil {
 		// User doesn't exist, create new one
 		if config.Debug {
-			log.Printf("👤 Creating new user: %s", claims.Email)
+			log.Printf("👤 Creating new user with %s: %s", idField, uniqueId)
 		}
 
 		record = models.NewRecord(collection)
-		record.Set("email", claims.Email)
+
+		// Set core fields
 		record.Set("name", getDisplayName(claims))
 		record.Set("username", generateUsername(claims))
 		record.Set("verified", true) // Trust Pomerium authentication
+
+		// Set email if available
+		if claims.Email != "" {
+			record.Set("email", claims.Email)
+		}
+
+		// Store Pomerium identifiers for future lookups
+		if claims.Oid != "" {
+			record.Set("pomerium_oid", claims.Oid)
+		}
+		if claims.Sub != "" {
+			record.Set("pomerium_sub", claims.Sub)
+		}
+		if claims.IdpId != "" {
+			record.Set("pomerium_idp_id", claims.IdpId)
+		}
 
 		// Set additional fields from JWT claims
 		if claims.GivenName != "" {
@@ -243,28 +282,40 @@ func findOrCreateUser(app *pocketbase.PocketBase, claims *PomeriumClaims, config
 		if claims.FamilyName != "" {
 			record.Set("family_name", claims.FamilyName)
 		}
-		if claims.Sub != "" {
-			record.Set("pomerium_sub", claims.Sub)
-		}
 
 		if err := app.Dao().SaveRecord(record); err != nil {
 			return nil, err
 		}
 
 		if config.Debug {
-			log.Printf("✅ User created successfully: %s (%s)", record.GetString("email"), record.Id)
+			emailInfo := "no email"
+			if claims.Email != "" {
+				emailInfo = claims.Email
+			}
+			log.Printf("✅ User created successfully: %s (%s) [%s]", emailInfo, record.Id, uniqueId)
 		}
 	} else {
 		// User exists, optionally update info
 		if config.Debug {
-			log.Printf("👤 User exists: %s (%s)", record.GetString("email"), record.Id)
+			log.Printf("👤 User exists: %s (%s)", record.GetString("name"), record.Id)
 		}
 
-		// Update name if it has changed
-		if getDisplayName(claims) != record.GetString("name") {
-			record.Set("name", getDisplayName(claims))
+		// Update name and email if they have changed
+		needsUpdate := false
+
+		if displayName := getDisplayName(claims); displayName != record.GetString("name") {
+			record.Set("name", displayName)
+			needsUpdate = true
+		}
+
+		if claims.Email != "" && claims.Email != record.GetString("email") {
+			record.Set("email", claims.Email)
+			needsUpdate = true
+		}
+
+		if needsUpdate {
 			if err := app.Dao().SaveRecord(record); err != nil {
-				log.Printf("⚠️  Failed to update user name: %v", err)
+				log.Printf("⚠️  Failed to update user info: %v", err)
 			}
 		}
 	}
@@ -282,11 +333,21 @@ func getDisplayName(claims *PomeriumClaims) string {
 	if claims.GivenName != "" {
 		return claims.GivenName
 	}
-	// Fall back to email prefix
-	if emailParts := strings.Split(claims.Email, "@"); len(emailParts) > 0 {
-		return emailParts[0]
+	// Fall back to email prefix if available
+	if claims.Email != "" {
+		if emailParts := strings.Split(claims.Email, "@"); len(emailParts) > 0 {
+			return emailParts[0]
+		}
+		return claims.Email
 	}
-	return claims.Email
+	// Final fallback to user ID
+	if claims.Oid != "" {
+		return "User " + claims.Oid[:8] // Show first 8 chars of OID
+	}
+	if claims.Sub != "" {
+		return "User " + claims.Sub[:8] // Show first 8 chars of Sub
+	}
+	return "Anonymous User"
 }
 
 func generateUsername(claims *PomeriumClaims) string {
@@ -296,5 +357,12 @@ func generateUsername(claims *PomeriumClaims) string {
 			return strings.ToLower(emailParts[0])
 		}
 	}
-	return "user"
+	// Generate username from ID if no email
+	if claims.Oid != "" {
+		return "user_" + strings.ToLower(claims.Oid[:8])
+	}
+	if claims.Sub != "" {
+		return "user_" + strings.ToLower(claims.Sub[:8])
+	}
+	return "anonymous_user"
 }
