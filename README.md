@@ -101,12 +101,10 @@ Returns information about the currently authenticated user.
 **Response**:
 
 ```json
-**Response**:
-```json
 {
   "user": {
-    "id": "7bd41554-4539-48e2-8b2c-f49a8823bb26",
-    "email": "user@example.com", 
+    "id": "7bd415544539486",
+    "email": "user@example.com",
     "display_name": "John Doe",
     "username": "john.doe",
     "verified": true
@@ -115,8 +113,9 @@ Returns information about the currently authenticated user.
 }
 ```
 
-**Note**: The `id` field contains the JWT's `oid` (Object ID) directly - no separate `jwt_id` field is needed.
-```
+**Note**: The `id` field contains the first 15 alphanumeric characters of the JWT's `oid` (dashes removed) due to PocketBase ID length limits. Collisions are extremely unlikely in practice.
+
+````
 
 **Usage**:
 
@@ -129,7 +128,7 @@ curl -H "X-Pomerium-Jwt-Assertion: <jwt>" https://your-app.com/api/pomerium/me
 
 # With admin token
 curl -H "Authorization: Bearer <admin_token>" https://your-app.com/api/pomerium/me
-```
+````
 
 ### `POST /api/pomerium/auth`
 
@@ -227,7 +226,7 @@ flowchart TD
    - `X-Pomerium-Jwt-Assertion` header (priority)
    - `_pomerium` cookie (fallback)
 3. **User Provisioning**: If JWT found, auto-creates/updates user using:
-   - **Record ID**: Uses JWT's `oid` (preferred) or `sub` directly as PocketBase user ID
+   - **Record ID**: Uses first 15 alphanumeric characters of JWT's `oid` (preferred) or `sub` (dashes removed) as PocketBase user ID
    - **Profile Data**: `email`, `name`, `given_name`, `family_name`
    - **Display Fields**: Generated `display_name` and `username`
    - **Lookup Method**: Direct ID lookup (`FindRecordById`) instead of field searches

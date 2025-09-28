@@ -138,8 +138,8 @@ func generateSecurePassword() string {
 	bytes := make([]byte, 32)
 	if _, err := cryptorand.Read(bytes); err != nil {
 		// Fallback to a timestamp-based password if crypto/rand fails
-		mathrand.Seed(time.Now().UnixNano())
-		return fmt.Sprintf("jwt-fallback-password-%d-%d-%d", os.Getpid(), time.Now().UnixNano(), mathrand.Int63())
+		rng := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
+		return fmt.Sprintf("jwt-fallback-password-%d-%d-%d", os.Getpid(), time.Now().UnixNano(), rng.Int63())
 	}
 	// Convert to hex string (64 characters long)
 	return hex.EncodeToString(bytes)
@@ -333,6 +333,17 @@ func findOrCreateUser(app core.App, claims PomeriumClaims) (*core.Record, error)
 		userID = claims.Sub
 	} else {
 		return nil, fmt.Errorf("no user identifier found in JWT claims (oid or sub)")
+	}
+
+	// Remove dashes and truncate to 15 characters for PocketBase ID limits
+	originalID := userID
+	userID = strings.ReplaceAll(userID, "-", "")
+	if len(userID) > 15 {
+		userID = userID[:15]
+	}
+
+	if originalID != userID {
+		log.Printf("Processed JWT ID: %s -> %s (removed dashes, truncated to 15 chars)", originalID, userID)
 	}
 
 	// First, try to find existing user by ID (using the JWT oid directly as the record ID)
