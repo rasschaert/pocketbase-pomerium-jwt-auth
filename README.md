@@ -1,48 +1,38 @@
 # PocketBase + Pomerium Zero JWT Integration
 
-**Trust-Based Architecture for Pomerium Zero** 🎯
+PocketBase offers a lot of functionality out of the box, but it allows you to [add your own logic on top in Go or Javascript](https://pocketbase.io/docs/use-as-framework/).
 
-Auto-provisions PocketBase users from Pomerium Zero JWT claims. Built for network-secured environments where Pomerium handles all authentication.
+By default, PocketBase allows unauthenticated requests to it's "collections". This projects adds a simple middleware to:
+
+- Require either a valid Authorization header (Bearer token) or a Pomerium JWT header for collection requests
+- If the Pomerium JWT header is present, auto-provision a PocketBase user from the JWT claims (email, name, sub, etc)
+
+Endpoints that are not for collection requests are not impacted by this middlware. This way Admin users can log in with username/password via the standard PocketBase admin UI, while regular users accessing collections are auto-provisioned via Pomerium Zero.
 
 ## ⚠️ **SECURITY WARNING**
 
-**🚨 THIS CODE DOES NOT VERIFY JWT SIGNATURES! 🚨**
+**🚨 THIS CODE DOES NOT (YET) VERIFY JWT SIGNATURES! 🚨**
 
-This implementation assumes:
-
-- **Pomerium Zero is the ONLY path to reach PocketBase**
-- **Network-level security prevents direct access**
-- **JWT signature validation happens at Pomerium**
-- **PocketBase trusts all incoming JWTs**
-
-**Only use this if PocketBase is completely isolated behind Pomerium!**
-
-## 🏗️ Architecture
-
-```
-Internet → Pomerium Zero (validates JWTs) → Network Barrier → PocketBase (trusts claims)
-```
-
-## � Building the Container
+## Building the Container
 
 ```bash
 # Build the image
-docker build -t pocketbase-pomerium .
+docker build -t pocketbase-pomerium-jwt-auth .
 
 # Or use docker-compose
 docker-compose build
 ```
 
-## 🚀 Running the Container
+## Running the Container
 
 ### Basic Docker Run
 
 ```bash
 docker run -d \
-  --name pocketbase \
+  --name pocketbase-pomerium-jwt-auth \
   -p 8090:8090 \
   -v ./data:/pb_data \
-  pocketbase-pomerium
+  pocketbase-pomerium-jwt-auth
 ```
 
 ### With Docker Compose
@@ -60,14 +50,14 @@ services:
       - JWT_HEADER=X-Pomerium-Jwt-Assertion
 ```
 
-## ⚙️ Configuration
+## Configuration
 
 Only 2 optional environment variables:
 
 - `DEBUG=true/false` - Enable debug logging
 - `JWT_HEADER=X-Custom-Header` - Change JWT header name
 
-## 🔧 Pomerium Zero Setup
+## Pomerium Zero Setup
 
 Configure Pomerium to forward JWTs:
 
@@ -82,34 +72,20 @@ routes:
 
 ## How It Works
 
-**Trust-Based Authentication Flow:**
+### For Collection Requests (`/api/collections/*`)
 
 1. User hits Pomerium Zero URL → Pomerium validates JWT signatures
 2. Pomerium forwards request → Includes JWT in `X-Pomerium-Jwt-Assertion` header
-3. PocketBase extracts claims → **NO signature validation** (trusts Pomerium)
-4. User auto-created → From JWT email, name, sub, etc.
+3. PocketBase middleware checks for JWT or valid Authorization Bearer token
+4. If JWT present: User auto-created/updated from JWT claims (email, name, sub, etc.)
+5. If Bearer token: Validates against existing PocketBase user/admin authentication
 
-**Zero-Crypto JWT Processing:**
+### For Admin Endpoints (`/api/_*` and `/api/admins/*`)
 
-```go
-// Just parse the JSON payload - no validation!
-func extractJWTClaims(token string) (*PomeriumClaims, error) {
-    parts := strings.Split(token, ".")
-    payload, _ := base64.URLEncoding.DecodeString(parts[1])
+- **No additional authentication required** - uses standard PocketBase admin authentication
+- Admin users can access the PocketBase admin UI normally at `/api/_/`
+- API endpoints for admin operations work with standard PocketBase admin tokens
 
-    var claims PomeriumClaims
-    json.Unmarshal(payload, &claims)
-    return &claims, nil  // Trust Pomerium's validation
-}
-```
+## License
 
-## ⚠️ **IMPORTANT REMINDERS**
-
-- **This code does NOT verify JWT signatures**
-- **Only use behind Pomerium Zero in isolated networks**
-- **Pomerium must be the ONLY way to reach PocketBase**
-- **Network security is your authentication boundary**
-
-## 📄 License
-
-MIT - Use freely (but securely)!
+MIT

@@ -16,12 +16,12 @@ import (
 
 // PomeriumClaims represents the JWT payload from Pomerium (no signature validation needed)
 type PomeriumClaims struct {
-	Email     string `json:"email"`
-	Name      string `json:"name"`
-	Sub       string `json:"sub"`
-	Aud       string `json:"aud"`
-	Iss       string `json:"iss"`
-	GivenName string `json:"given_name"`
+	Email      string `json:"email"`
+	Name       string `json:"name"`
+	Sub        string `json:"sub"`
+	Aud        string `json:"aud"`
+	Iss        string `json:"iss"`
+	GivenName  string `json:"given_name"`
 	FamilyName string `json:"family_name"`
 }
 
@@ -86,20 +86,67 @@ func getEnvOrDefault(key, defaultValue string) string {
 // processJWTClaims extracts claims from JWT without signature validation
 func processJWTClaims(c echo.Context, app *pocketbase.PocketBase, config *Config) error {
 	if config.Debug {
-		log.Printf("🔍 Processing JWT claims for users collection")
+		log.Printf("🔍 Processing authentication for users collection")
 	}
 
 	// Extract JWT from header
 	jwtToken := c.Request().Header.Get(config.JWTHeader)
+
+	// If no JWT token found, check for Authorization header
 	if jwtToken == "" {
-		if config.Debug {
-			log.Printf("⚠️  No JWT token found in header: %s", config.JWTHeader)
+		authHeader := c.Request().Header.Get("Authorization")
+		if authHeader == "" {
+			if config.Debug {
+				log.Printf("❌ No JWT token in header '%s' and no Authorization header found", config.JWTHeader)
+			}
+			return apis.NewUnauthorizedError("Authentication required: provide either JWT header or Authorization Bearer token", nil)
 		}
-		return nil // No JWT, continue without authentication
+
+		// Check if Authorization header has Bearer token format
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			if config.Debug {
+				log.Printf("❌ Authorization header found but not in Bearer format")
+			}
+			return apis.NewUnauthorizedError("Invalid Authorization header format: expected 'Bearer <token>'", nil)
+		}
+
+		// Extract the token from "Bearer <token>"
+		bearerToken := strings.TrimPrefix(authHeader, "Bearer ")
+		if bearerToken == "" {
+			if config.Debug {
+				log.Printf("❌ Authorization header has Bearer prefix but no token")
+			}
+			return apis.NewUnauthorizedError("Authorization header missing token", nil)
+		}
+
+		if config.Debug {
+			log.Printf("✅ Found valid Authorization Bearer token, checking if it's a valid PocketBase session")
+		}
+
+		// For Bearer tokens, we need to validate it's a valid PocketBase auth token
+		// This will automatically handle PocketBase admin and user authentication
+		authRecord, _ := apis.RequestInfo(c).AuthRecord, apis.RequestInfo(c).Admin
+		if authRecord == nil && apis.RequestInfo(c).Admin == nil {
+			if config.Debug {
+				log.Printf("❌ Bearer token is not a valid PocketBase authentication token")
+			}
+			return apis.NewUnauthorizedError("Invalid authentication token", nil)
+		}
+
+		if config.Debug {
+			if authRecord != nil {
+				log.Printf("✅ Valid user authentication with Bearer token: %s", authRecord.GetString("email"))
+			} else {
+				log.Printf("✅ Valid admin authentication with Bearer token")
+			}
+		}
+
+		// Valid Bearer token authentication - no need to process JWT claims
+		return nil
 	}
 
 	if config.Debug {
-		log.Printf("🔍 Found JWT token, extracting claims (no signature validation)")
+		log.Printf("✅ Found JWT token in header '%s', extracting claims (no signature validation)", config.JWTHeader)
 	}
 
 	// Extract claims from JWT payload (no validation)

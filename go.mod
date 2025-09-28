@@ -3,7 +3,6 @@ module pocketbase-pomerium-jwt-auth
 go 1.21
 
 require (
-	github.com/golang-jwt/jwt/v5 v5.0.0
 	github.com/labstack/echo/v5 v5.0.0-20230722203903-ec5b858dab61
 	github.com/pocketbase/pocketbase v0.19.4
 )
