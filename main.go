@@ -1,13 +1,17 @@
 package main
 
 import (
+	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	mathrand "math/rand"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/apis"
@@ -108,6 +112,19 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// generateSecurePassword creates a cryptographically secure random password
+func generateSecurePassword() string {
+	// Generate 32 random bytes (256 bits)
+	bytes := make([]byte, 32)
+	if _, err := cryptorand.Read(bytes); err != nil {
+		// Fallback to a timestamp-based password if crypto/rand fails
+		mathrand.Seed(time.Now().UnixNano())
+		return fmt.Sprintf("jwt-fallback-password-%d-%d-%d", os.Getpid(), time.Now().UnixNano(), mathrand.Int63())
+	}
+	// Convert to hex string (64 characters long)
+	return hex.EncodeToString(bytes)
 }
 
 // handlePomeriumAuth handles the custom auth endpoint
@@ -273,6 +290,7 @@ func updateUserRecord(record *core.Record, claims PomeriumClaims) {
 	if claims.FamilyName != "" {
 		record.Set("family_name", claims.FamilyName)
 	}
+	
 	// Set a display name (fallback hierarchy: name -> given+family -> email -> jwt_id)
 	displayName := getDisplayName(claims)
 	record.Set("display_name", displayName)
@@ -280,6 +298,18 @@ func updateUserRecord(record *core.Record, claims PomeriumClaims) {
 	// Set username (fallback hierarchy: preferred_username -> email -> jwt_id)
 	username := getUsername(claims)
 	record.Set("username", username)
+
+	// Set a cryptographically secure random password since these users authenticate via JWT/Pomerium
+	// This password will never be used for authentication but must be unguessable for security
+	securePassword := generateSecurePassword()
+	record.Set("password", securePassword)
+	record.Set("passwordConfirm", securePassword)
+	
+	// Set email visibility to true so emails are accessible
+	record.Set("emailVisibility", true)
+	
+	// Set verified to true since users are already verified by Pomerium
+	record.Set("verified", true)
 
 	log.Printf("Updated user record: display_name=%s, username=%s", displayName, username)
 }
